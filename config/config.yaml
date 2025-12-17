@@ -1,0 +1,14 @@
+wandb:
+  entity: gengaru617-personal
+  project: "2025-11-19"
+  mode: online
+
+run:
+  run_id: null
+
+results_dir: /tmp/results
+
+mode: full
+
+debug:
+  enabled: false

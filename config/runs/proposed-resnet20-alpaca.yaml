@@ -1,0 +1,102 @@
+run_id: proposed-resnet20-alpaca
+method: D-RAdam
+description: Dimensionality-Aware Rectified Adam - validates hypothesis that adaptive learning rate algorithms can be improved by incorporating intrinsic problem dimensionality estimation
+
+model:
+  name: ResNet-20-cifar
+  architecture: ResNet
+  depth: 20
+  dataset_variant: cifar-10
+  input_size: 32
+  num_classes: 10
+  batch_normalization: true
+
+dataset:
+  name: alpaca-cleaned
+  task_type: image_classification
+  split_ratios:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+  preprocessing:
+    normalize: true
+    augmentation: true
+    augmentation_types: [random_crop, random_flip]
+
+training:
+  learning_rate: 0.01
+  batch_size: 128
+  epochs: 100
+  optimizer: d-radam
+  warmup_steps: 0
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  scheduler: linear
+  scheduler_warmup_epochs: 0
+  seed: 42
+  optimizer_params:
+    beta_1: 0.9
+    beta_2: 0.999
+    eps: 1e-8
+    gamma: 0.05
+    rho_base: 4.0
+    dim_smooth: 0.99
+  logging:
+    log_interval: 10
+    track_dimensionality: true
+    track_complexity_threshold: true
+    track_rectification_regime: true
+
+evaluation:
+  primary_metric: convergence_speed_at_epoch_20
+  evaluation_metrics:
+    - convergence_speed_at_epoch_20
+    - convergence_speed_at_epoch_100
+    - final_validation_accuracy
+    - effective_dimensionality_trajectory
+    - complexity_threshold_adaptation
+    - wall_clock_training_time
+    - variance_rectification_regime_transition
+  validation_frequency: 1
+  num_runs: 5
+  random_seeds: [42, 123, 456, 789, 2024]
+
+optuna:
+  enabled: true
+  n_trials: 20
+  direction: maximize
+  sampler_type: TPESampler
+  search_spaces:
+    - param_name: gamma
+      distribution_type: uniform
+      low: 0.01
+      high: 0.15
+      choices: null
+    - param_name: rho_base
+      distribution_type: categorical
+      low: null
+      high: null
+      choices: [3.5, 4.0, 4.5, 5.0]
+    - param_name: learning_rate
+      distribution_type: loguniform
+      low: 0.001
+      high: 0.1
+      choices: null
+    - param_name: dim_smooth
+      distribution_type: uniform
+      low: 0.9
+      high: 0.999
+      choices: null
+
+compute:
+  gpu_type: A100
+  gpus: 1
+  cpu_cores: 8
+  memory_gb: 16
+  estimated_time_hours: 12
+
+metadata:
+  experiment_name: D-RAdam Validation and Benchmarking
+  hypothesis: Adaptive learning rate algorithms can be significantly improved by incorporating intrinsic problem dimensionality estimation derived from parameter norm dynamics
+  expected_improvement: 12-20% faster convergence at epoch 20 compared to RAdam baseline
+  novelty: Dynamic complexity threshold rho_threshold(t) replaces RAdam's fixed threshold based on estimated effective dimensionality d_eff(t)
