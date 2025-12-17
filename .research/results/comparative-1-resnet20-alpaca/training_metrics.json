@@ -1,0 +1,33 @@
+{
+  "run_id": "comparative-1-resnet20-alpaca",
+  "method": "RAdam-Baseline",
+  "optimizer": "radam",
+  "best_val_accuracy": 10.15625,
+  "best_val_epoch": 1,
+  "final_test_accuracy": 8.984375,
+  "final_test_loss": 6.016523122787476,
+  "convergence_speed_at_epoch_20": 0.0,
+  "convergence_speed_at_epoch_100": 0.0,
+  "wall_clock_training_time": 0.9383690357208252,
+  "train_losses": [
+    5.600993633270264
+  ],
+  "val_losses": [
+    5.89606237411499
+  ],
+  "train_accuracies": [
+    10.9375
+  ],
+  "val_accuracies": [
+    10.15625
+  ],
+  "d_eff_trajectory": [
+    1.0
+  ],
+  "rho_threshold_trajectory": [
+    4.0
+  ],
+  "variance_rectification_regime_transition": [
+    0.0
+  ]
+}
