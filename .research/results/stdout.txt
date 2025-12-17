@@ -8,3 +8,13 @@
 [2025-12-17 11:39:47,998][__main__][INFO] - Executing: /home/runner/work/test-matsuzawa-20251217-4/test-matsuzawa-20251217-4/.venv/bin/python3 -u /home/runner/work/test-matsuzawa-20251217-4/test-matsuzawa-20251217-4/src/train.py
 === [TRIAL RUN] PASSED for comparative-1-resnet20-alpaca at Wed Dec 17 11:40:03 UTC 2025 ===
 
+=== [UV SYNC] Start at Wed Dec 17 11:40:37 UTC 2025 ===
+=== [UV SYNC] Finished successfully at Wed Dec 17 11:41:14 UTC 2025 ===
+=== [TRIAL RUN] Start for proposed-resnet20-alpaca at Wed Dec 17 11:41:14 UTC 2025 ===
+[2025-12-17 11:41:14,744][__main__][INFO] - Trial mode: epochs=1, wandb.mode=disabled, optuna.n_trials=0
+[2025-12-17 11:41:14,745][__main__][INFO] - Starting experiment run: proposed-resnet20-alpaca
+[2025-12-17 11:41:14,745][__main__][INFO] - Mode: trial
+[2025-12-17 11:41:14,745][__main__][INFO] - Results directory: .research/results
+[2025-12-17 11:41:14,746][__main__][INFO] - Executing: /home/runner/work/test-matsuzawa-20251217-4/test-matsuzawa-20251217-4/.venv/bin/python3 -u /home/runner/work/test-matsuzawa-20251217-4/test-matsuzawa-20251217-4/src/train.py
+=== [TRIAL RUN] PASSED for proposed-resnet20-alpaca at Wed Dec 17 11:41:29 UTC 2025 ===
+
