@@ -31,19 +31,25 @@ def main(cfg: DictConfig) -> None:
         cfg: Hydra configuration from config.yaml
     """
     # Validate required CLI parameters
-    if not cfg.run.run_id:
+    # Handle cfg.run being either a string (run_id) or an object with run_id attribute
+    if isinstance(cfg.run, str):
+        run_id = cfg.run
+    elif hasattr(cfg.run, 'run_id'):
+        run_id = cfg.run.run_id
+    else:
+        run_id = None
+
+    if not run_id:
         logger.error("run parameter is required. Use: run=<run_id>")
         sys.exit(1)
-    
+
     if not cfg.results_dir:
         logger.error("results_dir parameter is required. Use: results_dir=<path>")
         sys.exit(1)
-    
+
     if not cfg.mode:
         logger.error("mode parameter is required. Use: mode=trial or mode=full")
         sys.exit(1)
-    
-    run_id = cfg.run.run_id
     results_dir = cfg.results_dir
     mode = cfg.mode
     
