@@ -1,0 +1,23 @@
+{
+  "run_id": "proposed-resnet20-alpaca",
+  "summary": {
+    "final_test_accuracy": 8.984375,
+    "final_test_loss": 6.016523122787476,
+    "convergence_speed_at_epoch_20": 0.0,
+    "convergence_speed_at_epoch_100": 0.0,
+    "wall_clock_training_time": 0.9071004390716553,
+    "best_val_accuracy": 10.15625,
+    "best_val_epoch": 1
+  },
+  "config": {
+    "method": "D-RAdam",
+    "optimizer": "d-radam"
+  },
+  "history_summary": {
+    "final_epoch": 1,
+    "final_train_loss": 5.600993633270264,
+    "final_val_loss": 5.89606237411499,
+    "final_train_accuracy": 10.9375,
+    "final_val_accuracy": 10.15625
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "primary_metric": "convergence_speed_at_epoch_20",
+  "metrics": {
+    "final_test_accuracy": {
+      "comparative-1-resnet20-alpaca": 8.984375,
+      "proposed-resnet20-alpaca": 8.984375
+    },
+    "final_test_loss": {
+      "comparative-1-resnet20-alpaca": 6.016523122787476,
+      "proposed-resnet20-alpaca": 6.016523122787476
+    },
+    "convergence_speed_at_epoch_20": {
+      "comparative-1-resnet20-alpaca": 0.0,
+      "proposed-resnet20-alpaca": 0.0
+    },
+    "convergence_speed_at_epoch_100": {
+      "comparative-1-resnet20-alpaca": 0.0,
+      "proposed-resnet20-alpaca": 0.0
+    },
+    "wall_clock_training_time": {
+      "comparative-1-resnet20-alpaca": 0.9383690357208252,
+      "proposed-resnet20-alpaca": 0.9071004390716553
+    },
+    "best_val_accuracy": {
+      "comparative-1-resnet20-alpaca": 10.15625,
+      "proposed-resnet20-alpaca": 10.15625
+    },
+    "best_val_epoch": {
+      "comparative-1-resnet20-alpaca": 1,
+      "proposed-resnet20-alpaca": 1
+    }
+  },
+  "best_proposed": {
+    "run_id": "proposed-resnet20-alpaca",
+    "value": 0.0
+  },
+  "best_baseline": {
+    "run_id": "comparative-1-resnet20-alpaca",
+    "value": 0.0
+  },
+  "gap": null
+}

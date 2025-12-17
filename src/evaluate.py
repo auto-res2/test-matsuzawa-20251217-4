@@ -30,17 +30,41 @@ def parse_arguments():
         description="Evaluate D-RAdam experiment results from WandB"
     )
     parser.add_argument(
-        "results_dir",
-        type=str,
-        help="Results directory for output files",
+        "args",
+        nargs="*",
+        help="Arguments in key=value format or positional",
     )
-    parser.add_argument(
-        "run_ids",
-        type=str,
-        help='JSON string list of run IDs (e.g., \'["run-1", "run-2"]\')',
-    )
-    
-    return parser.parse_args()
+
+    args = parser.parse_args()
+
+    # Parse key=value style arguments
+    parsed = {}
+    positional = []
+
+    for arg in args.args:
+        if "=" in arg:
+            key, value = arg.split("=", 1)
+            parsed[key] = value
+        else:
+            positional.append(arg)
+
+    # Handle positional arguments (backwards compatibility)
+    if len(positional) >= 2:
+        parsed["results_dir"] = positional[0]
+        parsed["run_ids"] = positional[1]
+
+    # Validate required arguments
+    if "results_dir" not in parsed:
+        parser.error("results_dir is required")
+    if "run_ids" not in parsed:
+        parser.error("run_ids is required")
+
+    # Create namespace object
+    class Args:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    return Args(**parsed)
 
 
 def load_wandb_config() -> Dict:
@@ -59,18 +83,82 @@ def load_wandb_config() -> Dict:
     return OmegaConf.to_container(cfg.wandb)
 
 
-def retrieve_run_data(entity: str, project: str, run_id: str) -> Optional[Dict]:
-    """Retrieve comprehensive run data from WandB API."""
+def retrieve_run_data(entity: str, project: str, run_id: str, results_dir: Path) -> Optional[Dict]:
+    """Retrieve comprehensive run data from local files or WandB API."""
     logger.info(f"Retrieving data for run: {run_id}")
-    
+
+    # First, try to load from local training_metrics.json
+    local_metrics_path = results_dir / run_id / "training_metrics.json"
+    if local_metrics_path.exists():
+        logger.info(f"Loading data from local file: {local_metrics_path}")
+        try:
+            with open(local_metrics_path, "r") as f:
+                local_data = json.load(f)
+
+            # Convert local data format to expected format
+            # Create history DataFrame from trajectory data
+            history_dict = {}
+
+            if "train_losses" in local_data and local_data["train_losses"]:
+                history_dict["train_loss"] = local_data["train_losses"]
+            if "val_losses" in local_data and local_data["val_losses"]:
+                history_dict["val_loss"] = local_data["val_losses"]
+            if "train_accuracies" in local_data and local_data["train_accuracies"]:
+                history_dict["train_accuracy"] = local_data["train_accuracies"]
+            if "val_accuracies" in local_data and local_data["val_accuracies"]:
+                history_dict["val_accuracy"] = local_data["val_accuracies"]
+            if "d_eff_trajectory" in local_data and local_data["d_eff_trajectory"]:
+                history_dict["d_eff"] = local_data["d_eff_trajectory"]
+            if "rho_threshold_trajectory" in local_data and local_data["rho_threshold_trajectory"]:
+                history_dict["rho_threshold"] = local_data["rho_threshold_trajectory"]
+            if "variance_rectification_regime_transition" in local_data and local_data["variance_rectification_regime_transition"]:
+                history_dict["variance_rectification_regime_transition"] = local_data["variance_rectification_regime_transition"]
+
+            # Make sure all arrays have the same length
+            if history_dict:
+                max_len = max(len(v) for v in history_dict.values())
+                history_dict["epoch"] = list(range(1, max_len + 1))
+            else:
+                history_dict["epoch"] = []
+
+            history = pd.DataFrame(history_dict)
+
+            # Create summary from local data
+            summary = {
+                "final_test_accuracy": local_data.get("final_test_accuracy", 0.0),
+                "final_test_loss": local_data.get("final_test_loss", 0.0),
+                "convergence_speed_at_epoch_20": local_data.get("convergence_speed_at_epoch_20", 0.0),
+                "convergence_speed_at_epoch_100": local_data.get("convergence_speed_at_epoch_100", 0.0),
+                "wall_clock_training_time": local_data.get("wall_clock_training_time", 0.0),
+                "best_val_accuracy": local_data.get("best_val_accuracy", 0.0),
+                "best_val_epoch": local_data.get("best_val_epoch", 0),
+            }
+
+            # Create config from local data
+            config = {
+                "method": local_data.get("method", ""),
+                "optimizer": local_data.get("optimizer", ""),
+            }
+
+            return {
+                "history": history,
+                "summary": summary,
+                "config": config,
+                "run_id": run_id,
+            }
+        except Exception as e:
+            logger.error(f"Error loading local data for run {run_id}: {e}")
+            # Fall through to WandB API
+
+    # Fall back to WandB API if local file doesn't exist
     try:
         api = wandb.Api()
         run = api.run(f"{entity}/{project}/{run_id}")
-        
+
         history = run.history()
         summary = run.summary._json_dict
         config = dict(run.config)
-        
+
         return {
             "history": history,
             "summary": summary,
@@ -117,62 +205,81 @@ def generate_per_run_figures(run_data: Dict, results_dir: Path) -> None:
     run_id = run_data["run_id"]
     run_dir = results_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    
+
     history = run_data["history"]
     if history.empty:
         logger.warning(f"No history data for run {run_id}")
         return
-    
+
+    # Set publication-quality style
+    plt.rcParams.update({
+        'font.size': 12,
+        'axes.titlesize': 14,
+        'axes.labelsize': 12,
+        'xtick.labelsize': 11,
+        'ytick.labelsize': 11,
+        'legend.fontsize': 11,
+        'figure.dpi': 300,
+    })
+
     # Learning curves
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
+
     if "epoch" in history.columns:
         epochs = history["epoch"].values
     else:
-        epochs = np.arange(len(history))
-    
+        epochs = np.arange(1, len(history) + 1)
+
     # Loss curve
     if "train_loss" in history.columns:
-        axes[0].plot(epochs, history["train_loss"], label="Train Loss", marker="o", markersize=3)
+        axes[0].plot(epochs, history["train_loss"], label="Train Loss", marker="o", markersize=5, linewidth=2)
     if "val_loss" in history.columns:
-        axes[0].plot(epochs, history["val_loss"], label="Val Loss", marker="s", markersize=3)
-    
+        axes[0].plot(epochs, history["val_loss"], label="Val Loss", marker="s", markersize=5, linewidth=2)
+
     # Mark epoch 20 if available
     if len(epochs) > 19:
-        axes[0].axvline(x=epochs[19], color="red", linestyle="--", alpha=0.5, label="Epoch 20")
+        axes[0].axvline(x=epochs[19], color="red", linestyle="--", alpha=0.5, label="Epoch 20", linewidth=1.5)
         if "train_loss" in history.columns:
             loss_20 = history["train_loss"].iloc[19]
-            axes[0].text(epochs[19], loss_20, f" {loss_20:.3f}", fontsize=9)
-    
-    axes[0].set_xlabel("Epoch")
-    axes[0].set_ylabel("Loss")
-    axes[0].set_title(f"{run_id} - Loss Trajectory")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    
+            axes[0].text(epochs[19], loss_20, f" {loss_20:.3f}", fontsize=10)
+
+    axes[0].set_xlabel("Epoch", fontsize=12)
+    axes[0].set_ylabel("Loss", fontsize=12)
+    axes[0].set_title(f"{run_id} - Loss Trajectory", fontsize=14, fontweight='bold')
+    axes[0].legend(loc='best', framealpha=0.9)
+    axes[0].grid(True, alpha=0.3, linewidth=0.5)
+
+    # For single epoch data, adjust x-axis to show clearly
+    if len(epochs) == 1:
+        axes[0].set_xlim([0.5, 1.5])
+
     # Accuracy curve
     if "train_accuracy" in history.columns:
-        axes[1].plot(epochs, history["train_accuracy"], label="Train Accuracy", marker="o", markersize=3)
+        axes[1].plot(epochs, history["train_accuracy"], label="Train Accuracy", marker="o", markersize=5, linewidth=2)
     if "val_accuracy" in history.columns:
-        axes[1].plot(epochs, history["val_accuracy"], label="Val Accuracy", marker="s", markersize=3)
-    
+        axes[1].plot(epochs, history["val_accuracy"], label="Val Accuracy", marker="s", markersize=5, linewidth=2)
+
     # Mark epoch 20 if available
     if len(epochs) > 19:
-        axes[1].axvline(x=epochs[19], color="red", linestyle="--", alpha=0.5, label="Epoch 20")
+        axes[1].axvline(x=epochs[19], color="red", linestyle="--", alpha=0.5, label="Epoch 20", linewidth=1.5)
         if "val_accuracy" in history.columns:
             acc_20 = history["val_accuracy"].iloc[19]
-            axes[1].text(epochs[19], acc_20, f" {acc_20:.1f}", fontsize=9)
-    
-    axes[1].set_xlabel("Epoch")
-    axes[1].set_ylabel("Accuracy (%)")
-    axes[1].set_title(f"{run_id} - Accuracy Trajectory")
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-    
+            axes[1].text(epochs[19], acc_20, f" {acc_20:.1f}", fontsize=10)
+
+    axes[1].set_xlabel("Epoch", fontsize=12)
+    axes[1].set_ylabel("Accuracy (%)", fontsize=12)
+    axes[1].set_title(f"{run_id} - Accuracy Trajectory", fontsize=14, fontweight='bold')
+    axes[1].legend(loc='best', framealpha=0.9)
+    axes[1].grid(True, alpha=0.3, linewidth=0.5)
+
+    # For single epoch data, adjust x-axis to show clearly
+    if len(epochs) == 1:
+        axes[1].set_xlim([0.5, 1.5])
+
     plt.tight_layout()
-    
+
     learning_curve_path = run_dir / f"{run_id}_learning_curve_train_val.pdf"
-    plt.savefig(learning_curve_path, dpi=150, bbox_inches="tight")
+    plt.savefig(learning_curve_path, dpi=300, bbox_inches="tight")
     plt.close()
     logger.info(f"Saved learning curves: {learning_curve_path}")
     print(f"  - {learning_curve_path}")
@@ -180,57 +287,73 @@ def generate_per_run_figures(run_data: Dict, results_dir: Path) -> None:
     # Dimensionality trajectory (D-RAdam only)
     if "d_eff" in history.columns:
         fig, ax = plt.subplots(figsize=(10, 6))
-        
-        ax.plot(epochs, history["d_eff"], label="Effective Dimensionality d_eff(t)", marker="o", markersize=3)
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("d_eff(t)")
-        ax.set_title(f"{run_id} - Effective Dimensionality Evolution")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
+
+        ax.plot(epochs, history["d_eff"], label="Effective Dimensionality d_eff(t)", marker="o", markersize=5, linewidth=2, color='#1f77b4')
+        ax.set_xlabel("Epoch", fontsize=12)
+        ax.set_ylabel("d_eff(t)", fontsize=12)
+        ax.set_title(f"{run_id} - Effective Dimensionality Evolution", fontsize=14, fontweight='bold')
+        ax.legend(loc='best', framealpha=0.9)
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+
+        # For single epoch data, adjust x-axis
+        if len(epochs) == 1:
+            ax.set_xlim([0.5, 1.5])
+
+        # Use scientific notation if values are large
+        if history["d_eff"].max() > 10000:
+            ax.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
+
         plt.tight_layout()
-        
+
         d_eff_path = run_dir / f"{run_id}_dimensionality_trajectory.pdf"
-        plt.savefig(d_eff_path, dpi=150, bbox_inches="tight")
+        plt.savefig(d_eff_path, dpi=300, bbox_inches="tight")
         plt.close()
         logger.info(f"Saved dimensionality trajectory: {d_eff_path}")
         print(f"  - {d_eff_path}")
-    
+
     # Complexity threshold trajectory (D-RAdam only)
     if "rho_threshold" in history.columns:
         fig, ax = plt.subplots(figsize=(10, 6))
-        
-        ax.plot(epochs, history["rho_threshold"], label="Complexity Threshold rho_threshold(t)", marker="o", markersize=3, color="orange")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("rho_threshold(t)")
-        ax.set_title(f"{run_id} - Complexity Threshold Evolution")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
+
+        ax.plot(epochs, history["rho_threshold"], label="Complexity Threshold rho_threshold(t)", marker="o", markersize=5, linewidth=2, color="orange")
+        ax.set_xlabel("Epoch", fontsize=12)
+        ax.set_ylabel("rho_threshold(t)", fontsize=12)
+        ax.set_title(f"{run_id} - Complexity Threshold Evolution", fontsize=14, fontweight='bold')
+        ax.legend(loc='best', framealpha=0.9)
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+
+        # For single epoch data, adjust x-axis
+        if len(epochs) == 1:
+            ax.set_xlim([0.5, 1.5])
+
         plt.tight_layout()
-        
+
         threshold_path = run_dir / f"{run_id}_complexity_threshold_trajectory.pdf"
-        plt.savefig(threshold_path, dpi=150, bbox_inches="tight")
+        plt.savefig(threshold_path, dpi=300, bbox_inches="tight")
         plt.close()
         logger.info(f"Saved complexity threshold trajectory: {threshold_path}")
         print(f"  - {threshold_path}")
-    
+
     # Variance rectification regime transition
     if "variance_rectification_regime_transition" in history.columns:
         fig, ax = plt.subplots(figsize=(10, 6))
-        
-        ax.plot(epochs, history["variance_rectification_regime_transition"], label="Rectification Active Fraction", marker="o", markersize=3, color="green")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Fraction of Steps in Rectified Regime")
+
+        ax.plot(epochs, history["variance_rectification_regime_transition"], label="Rectification Active Fraction", marker="o", markersize=5, linewidth=2, color="green")
+        ax.set_xlabel("Epoch", fontsize=12)
+        ax.set_ylabel("Fraction of Steps in Rectified Regime", fontsize=12)
         ax.set_ylim([0, 1.05])
-        ax.set_title(f"{run_id} - Variance Rectification Regime Transition")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
+        ax.set_title(f"{run_id} - Variance Rectification Regime Transition", fontsize=14, fontweight='bold')
+        ax.legend(loc='best', framealpha=0.9)
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+
+        # For single epoch data, adjust x-axis
+        if len(epochs) == 1:
+            ax.set_xlim([0.5, 1.5])
+
         plt.tight_layout()
-        
+
         rectification_path = run_dir / f"{run_id}_rectification_regime_transition.pdf"
-        plt.savefig(rectification_path, dpi=150, bbox_inches="tight")
+        plt.savefig(rectification_path, dpi=300, bbox_inches="tight")
         plt.close()
         logger.info(f"Saved rectification transition: {rectification_path}")
         print(f"  - {rectification_path}")
@@ -341,12 +464,23 @@ def generate_comparison_figures(
     """Generate comparison figures across all runs."""
     comparison_dir = results_dir / "comparison"
     comparison_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    # Set publication-quality style
+    plt.rcParams.update({
+        'font.size': 12,
+        'axes.titlesize': 14,
+        'axes.labelsize': 12,
+        'xtick.labelsize': 11,
+        'ytick.labelsize': 11,
+        'legend.fontsize': 11,
+        'figure.dpi': 300,
+    })
+
     run_ids = [run_data["run_id"] for run_data in all_run_data]
     convergence_speeds_20 = []
     final_accuracies = []
     wall_clock_times = []
-    
+
     for run_data in all_run_data:
         summary = run_data["summary"]
         convergence_speeds_20.append(
@@ -358,92 +492,90 @@ def generate_comparison_figures(
         wall_clock_times.append(
             summary.get("wall_clock_training_time", 0.0)
         )
-    
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="#2ca02c", alpha=0.8, label="Proposed (D-RAdam)"),
+        Patch(facecolor="#1f77b4", alpha=0.8, label="Baseline/Comparative"),
+    ]
+
     # Convergence speed comparison
     fig, ax = plt.subplots(figsize=(12, 6))
-    
-    colors = ["green" if "proposed" in rid else "blue" for rid in run_ids]
-    bars = ax.bar(range(len(run_ids)), convergence_speeds_20, color=colors, alpha=0.7)
-    
+
+    colors = ["#2ca02c" if "proposed" in rid else "#1f77b4" for rid in run_ids]
+    bars = ax.bar(range(len(run_ids)), convergence_speeds_20, color=colors, alpha=0.8, edgecolor='black', linewidth=1.2)
+
     for i, (bar, value) in enumerate(zip(bars, convergence_speeds_20)):
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
                 f"{value:.3f}",
-                ha="center", va="bottom", fontsize=10)
-    
-    ax.set_xlabel("Run ID")
-    ax.set_ylabel("Convergence Speed @ Epoch 20")
-    ax.set_title("Convergence Speed Comparison Across Runs")
+                ha="center", va="bottom", fontsize=11, fontweight='bold')
+
+    ax.set_xlabel("Run ID", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Convergence Speed @ Epoch 20", fontsize=12, fontweight='bold')
+    ax.set_title("Convergence Speed Comparison Across Runs", fontsize=14, fontweight='bold', pad=20)
     ax.set_xticks(range(len(run_ids)))
     ax.set_xticklabels(run_ids, rotation=45, ha="right")
-    ax.grid(True, alpha=0.3, axis="y")
-    
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor="green", alpha=0.7, label="Proposed (D-RAdam)"),
-        Patch(facecolor="blue", alpha=0.7, label="Baseline/Comparative"),
-    ]
-    ax.legend(handles=legend_elements, loc="upper left")
-    
+    ax.grid(True, alpha=0.3, axis="y", linewidth=0.5)
+    ax.legend(handles=legend_elements, loc="upper left", framealpha=0.9)
+
     plt.tight_layout()
     comparison_convergence_path = comparison_dir / "comparison_convergence_speed_bar.pdf"
-    plt.savefig(comparison_convergence_path, dpi=150, bbox_inches="tight")
+    plt.savefig(comparison_convergence_path, dpi=300, bbox_inches="tight")
     plt.close()
     logger.info(f"Saved convergence comparison: {comparison_convergence_path}")
     print(f"  - {comparison_convergence_path}")
-    
+
     # Final accuracy comparison
     fig, ax = plt.subplots(figsize=(12, 6))
-    
-    colors = ["green" if "proposed" in rid else "blue" for rid in run_ids]
-    bars = ax.bar(range(len(run_ids)), final_accuracies, color=colors, alpha=0.7)
-    
+
+    colors = ["#2ca02c" if "proposed" in rid else "#1f77b4" for rid in run_ids]
+    bars = ax.bar(range(len(run_ids)), final_accuracies, color=colors, alpha=0.8, edgecolor='black', linewidth=1.2)
+
     for i, (bar, value) in enumerate(zip(bars, final_accuracies)):
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
                 f"{value:.2f}%",
-                ha="center", va="bottom", fontsize=10)
-    
-    ax.set_xlabel("Run ID")
-    ax.set_ylabel("Final Test Accuracy (%)")
-    ax.set_title("Final Accuracy Comparison Across Runs")
+                ha="center", va="bottom", fontsize=11, fontweight='bold')
+
+    ax.set_xlabel("Run ID", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Final Test Accuracy (%)", fontsize=12, fontweight='bold')
+    ax.set_title("Final Accuracy Comparison Across Runs", fontsize=14, fontweight='bold', pad=20)
     ax.set_xticks(range(len(run_ids)))
     ax.set_xticklabels(run_ids, rotation=45, ha="right")
-    ax.grid(True, alpha=0.3, axis="y")
-    
-    ax.legend(handles=legend_elements, loc="lower right")
-    
+    ax.grid(True, alpha=0.3, axis="y", linewidth=0.5)
+    ax.legend(handles=legend_elements, loc="best", framealpha=0.9)
+
     plt.tight_layout()
     comparison_accuracy_path = comparison_dir / "comparison_final_accuracy_bar.pdf"
-    plt.savefig(comparison_accuracy_path, dpi=150, bbox_inches="tight")
+    plt.savefig(comparison_accuracy_path, dpi=300, bbox_inches="tight")
     plt.close()
     logger.info(f"Saved accuracy comparison: {comparison_accuracy_path}")
     print(f"  - {comparison_accuracy_path}")
-    
+
     # Wall-clock time comparison
     fig, ax = plt.subplots(figsize=(12, 6))
-    
-    colors = ["green" if "proposed" in rid else "blue" for rid in run_ids]
-    bars = ax.bar(range(len(run_ids)), wall_clock_times, color=colors, alpha=0.7)
-    
+
+    colors = ["#2ca02c" if "proposed" in rid else "#1f77b4" for rid in run_ids]
+    bars = ax.bar(range(len(run_ids)), wall_clock_times, color=colors, alpha=0.8, edgecolor='black', linewidth=1.2)
+
     for i, (bar, value) in enumerate(zip(bars, wall_clock_times)):
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
-                f"{value:.1f}s",
-                ha="center", va="bottom", fontsize=10)
-    
-    ax.set_xlabel("Run ID")
-    ax.set_ylabel("Wall-Clock Training Time (seconds)")
-    ax.set_title("Training Time Comparison Across Runs")
+                f"{value:.2f}s",
+                ha="center", va="bottom", fontsize=11, fontweight='bold')
+
+    ax.set_xlabel("Run ID", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Wall-Clock Training Time (seconds)", fontsize=12, fontweight='bold')
+    ax.set_title("Training Time Comparison Across Runs", fontsize=14, fontweight='bold', pad=20)
     ax.set_xticks(range(len(run_ids)))
     ax.set_xticklabels(run_ids, rotation=45, ha="right")
-    ax.grid(True, alpha=0.3, axis="y")
-    
-    ax.legend(handles=legend_elements, loc="upper left")
-    
+    ax.grid(True, alpha=0.3, axis="y", linewidth=0.5)
+    ax.legend(handles=legend_elements, loc="upper left", framealpha=0.9)
+
     plt.tight_layout()
     comparison_time_path = comparison_dir / "comparison_wall_clock_time_bar.pdf"
-    plt.savefig(comparison_time_path, dpi=150, bbox_inches="tight")
+    plt.savefig(comparison_time_path, dpi=300, bbox_inches="tight")
     plt.close()
     logger.info(f"Saved time comparison: {comparison_time_path}")
     print(f"  - {comparison_time_path}")
@@ -470,7 +602,7 @@ def main():
     # Retrieve data for all runs
     all_run_data = []
     for run_id in run_ids:
-        run_data = retrieve_run_data(entity, project, run_id)
+        run_data = retrieve_run_data(entity, project, run_id, results_dir)
         if run_data is not None:
             all_run_data.append(run_data)
         else:
