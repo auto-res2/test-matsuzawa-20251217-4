@@ -601,7 +601,7 @@ def main() -> None:
     config_dict = json.loads(config_json)
     cfg = OmegaConf.create(config_dict)
     
-    run_id = os.environ.get("EXPERIMENT_RUN_ID", cfg.run.run_id)
+    run_id = os.environ.get("EXPERIMENT_RUN_ID", cfg.run_id)
     mode = os.environ.get("EXPERIMENT_MODE", cfg.mode)
     results_dir = Path(os.environ.get("EXPERIMENT_RESULTS_DIR", cfg.results_dir))
     

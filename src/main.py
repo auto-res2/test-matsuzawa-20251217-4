@@ -36,6 +36,8 @@ def main(cfg: DictConfig) -> None:
         run_id = cfg.run
     elif hasattr(cfg.run, 'run_id'):
         run_id = cfg.run.run_id
+    elif hasattr(cfg, 'run_id'):
+        run_id = cfg.run_id
     else:
         run_id = None
 
