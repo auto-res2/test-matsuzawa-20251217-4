@@ -6,6 +6,85 @@ wandb:
 run:
   run_id: null
 
+run_id: null
+method: null
+description: null
+
+model:
+  name: null
+  architecture: null
+  depth: null
+  dataset_variant: null
+  input_size: null
+  num_classes: null
+  batch_normalization: null
+
+dataset:
+  name: null
+  task_type: null
+  split_ratios:
+    train: null
+    val: null
+    test: null
+  preprocessing:
+    normalize: null
+    augmentation: null
+    augmentation_types: null
+
+training:
+  learning_rate: null
+  batch_size: null
+  epochs: null
+  optimizer: null
+  warmup_steps: null
+  weight_decay: null
+  gradient_clip: null
+  scheduler: null
+  scheduler_warmup_epochs: null
+  seed: null
+  optimizer_params:
+    beta_1: null
+    beta_2: null
+    eps: null
+    gamma: null
+    rho_base: null
+    dim_smooth: null
+  logging:
+    log_interval: null
+    track_dimensionality: null
+    track_complexity_threshold: null
+    track_rectification_regime: null
+
+evaluation:
+  primary_metric: null
+  evaluation_metrics: null
+  validation_frequency: null
+  num_runs: null
+  random_seeds: null
+
+optuna:
+  enabled: null
+  n_trials: null
+  direction: null
+  sampler_type: null
+  search_spaces: null
+
+compute:
+  gpu_type: null
+  gpus: null
+  cpu_cores: null
+  memory_gb: null
+  estimated_time_hours: null
+
+metadata:
+  experiment_name: null
+  baseline_type: null
+  purpose: null
+  fixed_complexity_threshold: null
+  hypothesis: null
+  expected_improvement: null
+  novelty: null
+
 results_dir: /tmp/results
 
 mode: full
