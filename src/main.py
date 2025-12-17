@@ -92,11 +92,13 @@ def main(cfg: DictConfig) -> None:
     env["EXPERIMENT_MODE"] = mode
     env["EXPERIMENT_RESULTS_DIR"] = results_dir
     
+    # Get the absolute path to train.py
+    train_script = Path(__file__).parent / "train.py"
+
     cmd = [
         sys.executable,
         "-u",
-        "-m",
-        "src.train",
+        str(train_script),
     ]
     
     logger.info(f"Executing: {' '.join(cmd)}")

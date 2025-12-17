@@ -14,6 +14,9 @@ import math
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 
+# Add parent directory to path to allow imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import numpy as np
 import torch
 import torch.nn as nn

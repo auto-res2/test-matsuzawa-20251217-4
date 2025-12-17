@@ -24,3 +24,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["black", "isort", "flake8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
