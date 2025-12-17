@@ -137,5 +137,138 @@
     "experimental_code": "\nimport torch\nimport torch.nn as nn\nimport torch.optim as optim\nimport numpy as np\nimport math\n\nclass DRAdam(optim.Optimizer):\n    \"\"\"Dimensionality-Aware Rectified Adam (D-RAdam)\n    \n    Extends RAdam by dynamically adjusting variance rectification based on\n    estimated effective problem dimensionality inferred from parameter norm\n    growth dynamics.\n    \"\"\"\n    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,\n                 weight_decay=0, gamma=0.05, rho_base=4.0, dim_smooth=0.99):\n        \"\"\"\n        Args:\n            gamma: Controls sensitivity of complexity threshold to dimensionality (default 0.05)\n            rho_base: Baseline complexity threshold (default 4.0, recover RAdam with gamma=0)\n            dim_smooth: Smoothing factor for dimensionality estimate (default 0.99)\n        \"\"\"\n        if not 0.0 <= lr:\n            raise ValueError(\"Invalid learning rate: {}\".format(lr))\n        if not 0.0 <= eps:\n            raise ValueError(\"Invalid epsilon value: {}\".format(eps))\n        if not 0.0 <= betas[0] < 1.0:\n            raise ValueError(\"Invalid beta parameter at index 0: {}\".format(betas[0]))\n        if not 0.0 <= betas[1] < 1.0:\n            raise ValueError(\"Invalid beta parameter at index 1: {}\".format(betas[1]))\n        if not 0.0 <= weight_decay:\n            raise ValueError(\"Invalid weight_decay value: {}\".format(weight_decay))\n        if not 0.0 <= gamma:\n            raise ValueError(\"Invalid gamma value: {}\".format(gamma))\n\n        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,\n                       gamma=gamma, rho_base=rho_base, dim_smooth=dim_smooth)\n        super(DRAdam, self).__init__(params, defaults)\n\n    def step(self, closure=None):\n        loss = None\n        if closure is not None:\n            loss = closure()\n\n        for group in self.param_groups:\n            for p in group['params']:\n                if p.grad is None:\n                    continue\n\n                grad = p.grad.data\n                if grad.is_sparse:\n                    raise RuntimeError('D-RAdam does not support sparse gradients')\n\n                p_fp32 = p.data.float()\n\n                state = self.state[p]\n\n                # State initialization\n                if len(state) == 0:\n                    state['step'] = 0\n                    state['exp_avg'] = torch.zeros_like(p_fp32)\n                    state['exp_avg_sq'] = torch.zeros_like(p_fp32)\n                    state['param_norm_sq'] = 0.0\n                    state['d_eff'] = 1.0  # Initial effective dimensionality estimate\n\n                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']\n                state['step'] += 1\n\n                # Decay the first and second moment running average coefficient\n                exp_avg.mul_(group['betas'][0]).add_(grad, alpha=1 - group['betas'][0])\n                exp_avg_sq.mul_(group['betas'][1]).addcmul_(grad, grad, \n                                                            value=1 - group['betas'][1])\n\n                bias_correction1 = 1 - group['betas'][0] ** state['step']\n                bias_correction2 = 1 - group['betas'][1] ** state['step']\n\n                # Compute parameter norm (for dimensionality estimation)\n                param_norm_sq = torch.norm(p_fp32) ** 2\n                param_norm_sq_val = param_norm_sq.item()\n\n                # ===== NOVEL COMPONENT: Dimensionality-Aware Rectification =====\n                \n                # Estimate effective dimensionality from norm growth vs variance ratio\n                # d_eff(t) = ||theta(t)||^2 / ||g_smoothed(t)||^2\n                # (already computed in exp_avg_sq, need to account for bias correction)\n                \n                avg_grad_norm_sq = (exp_avg_sq.sum() / exp_avg_sq.numel()).item()\n                \n                # Avoid division by zero; add small epsilon\n                if avg_grad_norm_sq < 1e-8:\n                    d_eff_current = 1.0\n                else:\n                    d_eff_current = max(1.0, param_norm_sq_val / (avg_grad_norm_sq + 1e-8))\n                \n                # Exponentially smooth the dimensionality estimate\n                state['d_eff'] = (group['dim_smooth'] * state['d_eff'] + \n                                 (1 - group['dim_smooth']) * d_eff_current)\n                \n                # Adaptive complexity threshold based on effective dimensionality\n                rho_threshold = (group['rho_base'] + \n                                group['gamma'] * math.log(state['d_eff'] + 1.0))\n                \n                # Standard RAdam degrees of freedom estimation\n                beta2_t = group['betas'][1] ** state['step']\n                rho_inf = 2 / (1 - group['betas'][1]) - 1\n                rho_t = rho_inf - 2 * state['step'] * beta2_t / bias_correction2\n\n                # ===== ADAPTIVE VARIANCE RECTIFICATION =====\n                \n                # Use adaptive threshold instead of fixed rho_t > 4\n                if rho_t > rho_threshold:\n                    # Variance-rectified adaptive learning rate\n                    rect_term = math.sqrt(\n                        (rho_t - rho_threshold) * (rho_t - 2) * rho_inf /\n                        ((rho_inf - rho_threshold) * (rho_inf - 2) * rho_t)\n                    )\n                    \n                    adaptive_lr = group['lr'] * rect_term / math.sqrt(bias_correction2)\n                    \n                    denom = exp_avg_sq.sqrt().add_(group['eps'])\n                    p_fp32.addcdiv_(exp_avg, denom, value=-adaptive_lr)\n                else:\n                    # Early/high-dimensional stages: momentum-only SGD\n                    # (relies on first moment estimate which is more stable in high dimensions)\n                    adaptive_lr = group['lr'] / bias_correction1\n                    p_fp32.add_(exp_avg, alpha=-adaptive_lr)\n\n                # Weight decay\n                if group['weight_decay'] != 0:\n                    p_fp32.add_(p_fp32, alpha=-group['weight_decay'] * group['lr'])\n\n                p.data.copy_(p_fp32)\n\n        return loss\n\n\n# Validation: Synthetic High-Dimensional Ridge Regression\ndef validate_d_radam_synthetic():\n    \"\"\"\n    Validate D-RAdam on controlled high-dimensional problem with known effective rank.\n    This allows direct verification that dimensionality adaptation mechanism works correctly.\n    \"\"\"\n    torch.manual_seed(42)\n    np.random.seed(42)\n    \n    # High-dimensional ridge regression with controlled effective rank\n    d = 1000  # Dimension\n    n = 500   # Number of samples\n    rank = 10  # True effective rank (parameter space is low-rank)\n    \n    # Generate low-rank data: X = U @ V^T where U is n x rank, V is d x rank\n    U = torch.randn(n, rank)\n    V = torch.randn(d, rank)\n    X = (U @ V.T) / math.sqrt(d)  # Normalize\n    \n    # True parameters are in the low-rank subspace\n    true_params = V[:, :rank] @ torch.randn(rank)\n    y = X @ true_params + 0.1 * torch.randn(n)\n    \n    # Test different configurations\n    configs = [\n        {'gamma': 0.0, 'name': 'RAdam (baseline)'},\n        {'gamma': 0.05, 'name': 'D-RAdam (gamma=0.05)'},\n        {'gamma': 0.1, 'name': 'D-RAdam (gamma=0.1)'},\n    ]\n    \n    results = {}\n    \n    for config in configs:\n        params = nn.Parameter(torch.zeros(d, requires_grad=True))\n        optimizer = DRAdam([params], lr=0.1, gamma=config['gamma'])\n        \n        losses = []\n        d_effs = []\n        \n        for epoch in range(200):\n            optimizer.zero_grad()\n            y_pred = X @ params\n            loss = ((y_pred - y) ** 2).mean()\n            loss.backward()\n            \n            losses.append(loss.item())\n            \n            # Extract dimensionality estimate (for diagnostics)\n            state = optimizer.state[params]\n            d_effs.append(state['d_eff'])\n            \n            optimizer.step()\n        \n        results[config['name']] = {\n            'losses': losses,\n            'd_effs': d_effs,\n            'final_loss': losses[-1],\n            'convergence_speed_20': 1.0 - (losses[19] / losses[0]) if losses[0] > 0 else 0,\n        }\n    \n    # Print comparison\n    print(\"D-RAdam Synthetic Validation (High-Dimensional Ridge Regression)\")\n    print(\"=\" * 80)\n    print(f\"{'Method':<30} {'Final Loss':<20} {'Conv Speed @ Epoch 20':<25}\")\n    print(\"-\" * 80)\n    for name, result in results.items():\n        print(f\"{name:<30} {result['final_loss']:<20.6f} {result['convergence_speed_20']:<25.4f}\")\n    \n    print(\"\\n✓ D-RAdam should show:\")\n    print(\"  - Faster convergence in early epochs (20-50) due to adaptive threshold\")\n    print(\"  - Lower final loss through better high-dimensional handling\")\n    print(\"  - d_eff evolution should show smooth transition from high to low regime\")\n    print(\"  - gamma=0 recovers standard RAdam\")\n    \n    return results\n\n\nif __name__ == \"__main__\":\n    results = validate_d_radam_synthetic()\n",
     "expected_result": "We expect D-RAdam to demonstrate meaningful improvements in both early-stage and overall convergence compared to standard RAdam, particularly on problems with varying effective dimensionality. Specific quantitative predictions: (1) On CIFAR-10 with ResNet-20, convergence_speed_at_epoch_20 should improve by 12-20% for D-RAdam with gamma=0.05 compared to RAdam baseline (from ~0.65 to ~0.75). This represents substantial early-stage acceleration by leveraging dimensionality information. (2) On One Billion Word language modeling, perplexity reduction at epoch 1-5 should be 8-15% for D-RAdam, with cumulative training time comparable to RAdam (dimensionality estimation adds negligible cost: one parameter norm computation + scalar operations already available in exp_avg_sq). (3) The adaptive complexity threshold rho_threshold(t) should evolve smoothly: starting at 4.0-4.5 in early training (high-dimensional, momentum-only regime) and rising to 5.0-6.0+ as effective dimensionality decreases (entering low-dimensional learning regime). This evolution should be visible in logged d_eff(t) trajectories. (4) On synthetic high-dimensional ridge regression (d=10000, rank=10), D-RAdam should show 15-25% faster convergence at epoch 20 due to explicit adaptation to known rank structure. (5) Across different learning rates {0.1, 0.03, 0.01}, D-RAdam should show consistent 10-15% improvement in convergence_speed_at_epoch_20, demonstrating robustness to learning rate choice and superiority over fixed-threshold RAdam. (6) Final test accuracy on ImageNet-1k should match or exceed RAdam (no degradation in asymptotic performance), confirming that early-stage benefits via dimensionality adaptation do not compromise final generalization. (7) Wall-clock training time should be within 2-5% of RAdam, validating efficiency. Standard deviation across 5 runs should be ≤3% of mean metric values, indicating stable improvement.",
     "expected_conclusion": "D-RAdam demonstrates that adaptive learning rate algorithms can be significantly improved by incorporating intrinsic problem dimensionality estimation derived from parameter norm dynamics and gradient statistics that are already computed in standard Adam-family optimizers. The key insight is that the variance rectification strategy in RAdam uses a fixed complexity threshold that does not account for how the effective dimensionality of the training problem evolves during training. By dynamically adjusting this threshold based on the ratio of parameter norm growth to gradient variance (a quantity naturally available in the optimizer state), we enable the algorithm to transition smoothly between optimization regimes: early-stage high-dimensional training (where momentum-only methods are superior) and later-stage low-dimensional feature learning (where variance rectification becomes beneficial). This is fundamentally more principled than RAdam's fixed rho_t > 4 criterion. The expected 12-20% improvement in convergence speed at epoch 20 translates to practical benefits in wall-clock time, especially on large-scale problems where early-stage convergence dominates overall training cost. This work contributes both theoretically (formalization of how problem dimensionality changes during training in normalized networks) and practically (a simple, efficient modification to RAdam that practitioners can use immediately). The introduction of d_eff(t) as a diagnostic signal opens new research directions: understanding implicit regularization through dimensionality tracking, designing curriculum learning schedules based on effective rank, and developing automatic hyperparameter tuning based on dimensionality evolution. Unlike the current hypothesis (SA-RAdam), which adds a logarithmic scale factor with limited theoretical justification, D-RAdam is grounded in fundamental optimization principles (effective dimensionality) and demonstrates why adaptive thresholding is necessary, making it a more significant and novel contribution to adaptive learning rate research."
+  },
+  "experimental_design": {
+    "experiment_summary": "\nExperiment: Dimensionality-Aware Rectified Adam (D-RAdam) - Validation and Benchmarking\n\nThis experiment validates the hypothesis that adaptive learning rate algorithms can be significantly improved by incorporating intrinsic problem dimensionality estimation derived from parameter norm dynamics. The proposed method, D-RAdam, extends RAdam by dynamically adjusting variance rectification based on the estimated effective dimensionality of the training problem, inferred from the ratio of parameter norm growth rate to gradient variance.\n\n**Task Nature:**\nThe experiment conducts comprehensive benchmarking of D-RAdam against baseline methods (RAdam, Adam, RMSprop) across multiple domains:\n1. **Image Classification**: ResNet-20 and DenseNet-40 on CIFAR-10, evaluating convergence speed at early epochs\n2. **Synthetic High-Dimensional Regression**: Controlled ridge regression with known effective rank to directly validate dimensionality adaptation mechanism\n3. **Training Dynamics Monitoring**: Real-time tracking of effective dimensionality d_eff(t) to demonstrate that the estimation correctly captures training phase transitions\n\n**Purpose and Components:**\n- **Primary Purpose**: Demonstrate that D-RAdam achieves 12-20% faster convergence at epoch 20 compared to RAdam baseline by leveraging problem dimensionality information\n- **Core Innovation**: Dynamic complexity threshold rho_threshold(t) = rho_base + gamma * log(d_eff(t) + 1) replaces RAdam's fixed threshold (rho_t > 4)\n- **Key Components**:\n  1. Effective dimensionality estimator: d_eff(t) = ||theta(t)||^2 / ||g_smoothed(t)||^2\n  2. Adaptive rectification mechanism that transitions between momentum-only (high-dimensional) and variance-rectified (low-dimensional) regimes\n  3. Diagnostic tracking of d_eff(t) evolution to validate theory\n- **Workflow**:\n  1. Train D-RAdam and comparison methods with identical hyperparameters (except optimizer-specific tuning)\n  2. Log d_eff(t), rho_threshold(t), and convergence metrics at each epoch\n  3. Compute convergence_speed_at_epoch_20, final validation accuracy, and wall-clock time\n  4. Run 5 independent trials with different random seeds for statistical significance\n  5. Analyze d_eff(t) trajectories to verify dimensionality adaptation hypothesis\n\n**Experiment Scale Adjustment for GPU-Runner (A100/H200, 80GB VRAM, 2TB RAM):**\n- **CIFAR-10 Training**: Batch size 128, single GPU, ~2 hours total across all methods and seeds\n- **Synthetic Benchmark**: High-dimensional ridge regression (d=1000, n=500) to enable fast iteration while maintaining controlled rank structure validation\n- **Memory Footprint**: ResNet-20 requires ~3GB per batch, well within 80GB VRAM limits; allows parallel hyperparameter tuning\n- **Computational Cost**: ~24 GPU-hours total (5 seeds × 3 methods × 1.6 hours per run), fitting comfortably within typical runner allocation\n- **No ImageNet**: Excluded large-scale training to prioritize comprehensive hyperparameter tuning and statistical validation on CIFAR-10/synthetic tasks\n",
+    "runner_config": {
+      "runner_label": "gpu-runner",
+      "description": "NVIDIA A100 or H200, VRAM: 80 GB or more, RAM: 2048 GB or more"
+    },
+    "evaluation_metrics": [
+      {
+        "name": "convergence_speed_at_epoch_20",
+        "description": "Measures how quickly the model converges in early training stages. Defined as (1 - loss_at_epoch_20 / loss_at_epoch_1), capturing the fraction of initial loss reduction achieved by epoch 20. This metric is primary and directly tests the hypothesis that D-RAdam achieves faster early-stage convergence by adapting to problem dimensionality. Correctness Criteria: Higher values (0.0-1.0) indicate faster convergence; values >0.65 for CIFAR-10 baseline are considered good. Calculation Method: convergence_speed_20 = max(0, 1 - loss[19]/loss[0]) to avoid negative values from noise. Task Appropriateness: In overparameterized networks with batch normalization, early-stage convergence is dominated by high-dimensional gradient noise, making this metric ideal for validating dimensionality-aware adaptation. Visualization: Learning curve plots showing loss trajectories for all methods superimposed, with epoch 20 marked; bar chart comparing convergence_speed_at_epoch_20 across methods with error bars from 5 runs."
+      },
+      {
+        "name": "convergence_speed_at_epoch_100",
+        "description": "Measures overall convergence as a longer-term trajectory. Defined as (1 - loss_at_epoch_100 / loss_at_epoch_1), providing evidence that early-stage benefits do not degrade asymptotic performance. Correctness Criteria: Should match or slightly exceed RAdam; degradation >5% indicates method failure. Calculation Method: convergence_speed_100 = max(0, 1 - loss[99]/loss[0]). Task Appropriateness: Validates that dimensionality adaptation provides sustained benefits through training, not temporary advantages that reverse later. Visualization: Full-epoch learning curves; comparison table of convergence_speed_at_epoch_20 vs epoch_100 showing trajectory consistency."
+      },
+      {
+        "name": "final_validation_accuracy",
+        "description": "Measures generalization performance after full training. Defined as classification accuracy on validation/test set after training completes. Correctness Criteria: Final accuracy should be within ±1% of RAdam baseline (no degradation); improvements indicate better optimization. Calculation Method: accuracy = (correct_predictions / total_predictions). Task Appropriateness: Confirms that early-stage acceleration through dimensionality adaptation does not compromise final model quality or generalization. Visualization: Box plots of final accuracy across 5 runs and all methods; table of mean ± std accuracy."
+      },
+      {
+        "name": "effective_dimensionality_trajectory",
+        "description": "Diagnostic metric tracking the estimated effective dimensionality d_eff(t) throughout training. This is the key diagnostic signal validating the theoretical hypothesis. Defined as d_eff(t) = ||theta(t)||^2 / mean(exp_avg_sq(t)), smoothed exponentially with factor 0.99. Correctness Criteria: d_eff(t) should evolve smoothly from high values (2-10) in early training to lower values (1-3) in later stages, reflecting transition from high-dimensional gradient noise to low-dimensional feature learning. Calculation Method: At each step, compute parameter norm, smoothed gradient variance, and exponentially smooth the ratio. Task Appropriateness: Directly validates the core hypothesis that problem dimensionality changes during training; provides evidence that the method's complexity threshold adaptation is responsive to real problem structure. Visualization: Line plots of d_eff(t) vs epoch for D-RAdam with different gamma values (0.01, 0.05, 0.1) and RAdam (gamma=0), overlaid with rho_threshold(t) evolution; heatmap showing d_eff correlations with convergence speed."
+      },
+      {
+        "name": "complexity_threshold_adaptation",
+        "description": "Tracks the dynamic adjustment of rho_threshold(t) = rho_base + gamma * log(d_eff(t) + 1) throughout training. Correctness Criteria: rho_threshold should start near rho_base (4.0-5.0) and increase smoothly to 5-6+ as effective dimensionality decreases, demonstrating responsiveness to d_eff(t). Calculation Method: rho_threshold(t) = rho_base + gamma * log(max(d_eff(t), 1.0) + 1). Task Appropriateness: Provides transparency into the adaptive mechanism; validates that threshold escalates appropriately during training phases. Visualization: Line plots of rho_threshold(t) vs epoch for different gamma values; scatter plot of (rho_threshold, convergence_speed) to show correlation between adaptation strength and convergence improvement."
+      },
+      {
+        "name": "wall_clock_training_time",
+        "description": "Measures computational efficiency. Defined as total wall-clock time (seconds) for complete training across all epochs. Correctness Criteria: Should be within 2-5% of RAdam, validating that dimensionality estimation adds negligible overhead. Calculation Method: Record system time at training start and end; compute difference. Task Appropriateness: Ensures practical applicability; overhead from norm tracking and log computations must be minimal. Visualization: Bar chart comparing wall-clock time across methods; ratio plot showing time overhead vs RAdam baseline."
+      },
+      {
+        "name": "variance_rectification_regime_transition",
+        "description": "Secondary diagnostic metric measuring the fraction of training steps where variance rectification is active (rho_t > rho_threshold). Defined as active_steps / total_steps. Correctness Criteria: Should be low early (0.0-0.2 in first 20 epochs) and increase to high (0.8-1.0) in later epochs, showing smooth transition from momentum-only to rectified regimes. Calculation Method: Count steps where rho_t > rho_threshold divided by total steps, computed in epoch bins. Task Appropriateness: Validates that the method correctly identifies problem phase (high-dimensional vs low-dimensional) and adapts accordingly. Visualization: Step count histograms showing fraction of rectification-active steps per epoch; comparison across methods."
+      },
+      {
+        "name": "synthetic_convergence_speedup",
+        "description": "For high-dimensional ridge regression with known rank: speedup factor = (convergence_epoch_20_radam / convergence_epoch_20_dradam). Correctness Criteria: D-RAdam should achieve 1.15-1.25× speedup on synthetic data (15-25% improvement), directly testing dimensionality adaptation on controlled problem. Calculation Method: Run on d=1000, n=500 ridge regression with rank=10; measure epoch where loss reaches threshold. Task Appropriateness: Controlled synthetic setting eliminates confounding factors; validates core mechanism on ground-truth effective rank structure. Visualization: Convergence curves on synthetic data; bar chart of speedup factors for different gamma values and rank settings."
+      }
+    ],
+    "models_to_use": [
+      "ResNet-20-cifar"
+    ],
+    "datasets_to_use": [
+      "alpaca-cleaned"
+    ],
+    "proposed_method": {
+      "method_name": "D-RAdam",
+      "description": "Dimensionality-Aware Rectified Adam (D-RAdam) extends RAdam by dynamically adjusting the variance rectification complexity threshold based on estimated effective problem dimensionality. Core mechanism: (1) Compute effective dimensionality d_eff(t) = ||theta(t)||^2 / mean(exp_avg_sq(t)) at each step; (2) Adaptively set rho_threshold(t) = rho_base + gamma * log(d_eff(t) + 1) instead of fixed threshold; (3) Apply variance rectification only when rho_t > rho_threshold, enabling smooth transition from momentum-only (high-dimensional noise regimes) to variance-rectified (low-dimensional learning). Novelty: Principled adaptation to intrinsic problem structure via parameter norm velocity, capturing how 'information-dense' each training phase is. Unlike RAdam's fixed rho_t > 4 criterion, D-RAdam responds to actual training dynamics.",
+      "training_config": {
+        "learning_rate": 0.01,
+        "batch_size": 128,
+        "epochs": 100,
+        "optimizer": "d-radam",
+        "warmup_steps": 0,
+        "weight_decay": 0.0001,
+        "gradient_clip": 1.0,
+        "scheduler": "linear",
+        "seed": 42,
+        "additional_params": "{\"gamma\": 0.05, \"rho_base\": 4.0, \"dim_smooth\": 0.99, \"eps\": 1e-8, \"beta_1\": 0.9, \"beta_2\": 0.999}"
+      },
+      "optuna_config": {
+        "enabled": true,
+        "n_trials": 20,
+        "search_spaces": [
+          {
+            "param_name": "gamma",
+            "distribution_type": "uniform",
+            "low": 0.01,
+            "high": 0.15
+          },
+          {
+            "param_name": "rho_base",
+            "distribution_type": "categorical",
+            "choices": [
+              3.5,
+              4.0,
+              4.5,
+              5.0
+            ]
+          },
+          {
+            "param_name": "learning_rate",
+            "distribution_type": "loguniform",
+            "low": 0.001,
+            "high": 0.1
+          },
+          {
+            "param_name": "dim_smooth",
+            "distribution_type": "uniform",
+            "low": 0.9,
+            "high": 0.999
+          }
+        ]
+      }
+    },
+    "comparative_methods": [
+      {
+        "method_name": "RAdam-Baseline",
+        "description": "Rectified Adam (RAdam) with fixed variance rectification threshold rho_t > 4. This is the direct baseline for D-RAdam, representing the standard approach without dimensionality adaptation. RAdam uses bias-corrected estimates of adaptive learning rate with variance rectification to mitigate large variance in adaptive learning rate during early training. Core mechanism: variance rectification term r_t = sqrt[(rho_t - 4)(rho_t - 2)rho_inf / ((rho_inf - 4)(rho_inf - 2)rho_t)] when rho_t > 4, otherwise momentum-only. Serves as primary comparison to isolate the contribution of dimensionality-aware threshold adaptation.",
+        "training_config": {
+          "learning_rate": 0.01,
+          "batch_size": 128,
+          "epochs": 100,
+          "optimizer": "radam",
+          "warmup_steps": 0,
+          "weight_decay": 0.0001,
+          "gradient_clip": 1.0,
+          "scheduler": "linear",
+          "seed": 42,
+          "additional_params": "{\"eps\": 1e-8, \"beta_1\": 0.9, \"beta_2\": 0.999}"
+        },
+        "optuna_config": {
+          "enabled": true,
+          "n_trials": 20,
+          "search_spaces": [
+            {
+              "param_name": "learning_rate",
+              "distribution_type": "loguniform",
+              "low": 0.001,
+              "high": 0.1
+            },
+            {
+              "param_name": "weight_decay",
+              "distribution_type": "loguniform",
+              "low": 1e-05,
+              "high": 0.001
+            }
+          ]
+        }
+      }
+    ]
   }
 }
